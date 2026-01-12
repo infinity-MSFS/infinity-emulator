@@ -1,83 +1,138 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-export function AttitudeCanvas({ width, height, fps = 20 }: { width: number; height: number; fps?: number }) {
-  const ref = useRef<HTMLCanvasElement>(null);
+import attitudeConfig from "./gauge.attitude.json";
 
-  useEffect(() => {
-    let alive = true;
-    const canvas = ref.current!;
-    const ctx = canvas.getContext("2d")!;
+type GaugeConfig = {
+	framebufferWidth: number;
+	framebufferHeight: number;
+};
 
-    let rafId = 0;
-    let inFlight = false;
-    let lastFrameAt = 0;
-    let lastFbw = 0;
-    let lastFbh = 0;
+export function AttitudeCanvas({
+	containerWidth,
+	containerHeight,
+	fps = 20,
+	config = attitudeConfig as GaugeConfig,
+}: {
+	containerWidth: number;
+	containerHeight: number;
+	fps?: number;
+	config?: GaugeConfig;
+}) {
+	const ref = useRef<HTMLCanvasElement>(null);
 
-    const loop = async (t: number) => {
-      if (!alive) return;
+	const native = useMemo(() => {
+		const framebufferWidth = Math.max(
+			1,
+			Math.floor(config.framebufferWidth || 1),
+		);
+		const framebufferHeight = Math.max(
+			1,
+			Math.floor(config.framebufferHeight || 1),
+		);
+		return { framebufferWidth, framebufferHeight };
+	}, [config.framebufferWidth, config.framebufferHeight]);
 
-      // FPS limit
-      const minDt = 1000 / fps;
-      if (t - lastFrameAt < minDt || inFlight) {
-        rafId = requestAnimationFrame(loop);
-        return;
-      }
+	useEffect(() => {
+		const canvas = ref.current;
+		if (!canvas) return;
 
-      inFlight = true;
-      lastFrameAt = t;
+		const cw = Math.max(0, containerWidth);
+		const ch = Math.max(0, containerHeight);
+		if (cw === 0 || ch === 0) return;
 
-      try {
-        // High DPR explodes pixel count quickly. Clamp for performance.
-        const dpr = Math.min(window.devicePixelRatio || 1, 1);
+		const aspect = native.framebufferWidth / native.framebufferHeight;
+		const containerAspect = cw / ch;
 
-        // Rust returns a binary Response: [u32 fbw][u32 fbh][rgba...]
-        const payload = await invoke<ArrayBuffer | number[]>("render_attitude", {
-          winW: width,
-          winH: height,
-          dpr,
-        });
+		let displayW = cw;
+		let displayH = ch;
+		if (containerAspect > aspect) {
+			displayH = ch;
+			displayW = Math.floor(ch * aspect);
+		} else {
+			displayW = cw;
+			displayH = Math.floor(cw / aspect);
+		}
 
-        let fbw: number;
-        let fbh: number;
-        let pixels: Uint8ClampedArray;
+		canvas.style.width = `${Math.max(1, displayW)}px`;
+		canvas.style.height = `${Math.max(1, displayH)}px`;
+	}, [
+		containerWidth,
+		containerHeight,
+		native.framebufferWidth,
+		native.framebufferHeight,
+	]);
 
-        if (payload instanceof ArrayBuffer) {
-          const header = new DataView(payload, 0, 8);
-          fbw = header.getUint32(0, true);
-          fbh = header.getUint32(4, true);
-          pixels = new Uint8ClampedArray(payload, 8);
-        } else {
-          // Fallback if something still returns JSON.
-          fbw = Math.round(width * dpr);
-          fbh = Math.round(height * dpr);
-          pixels = new Uint8ClampedArray(payload);
-        }
+	useEffect(() => {
+		let alive = true;
+		const canvas = ref.current!;
+		const ctx = canvas.getContext("2d")!;
 
-        // Resize only when needed (resizing clears and is expensive)
-        if (fbw !== lastFbw || fbh !== lastFbh) {
-          lastFbw = fbw;
-          lastFbh = fbh;
-          canvas.width = fbw;
-          canvas.height = fbh;
-          canvas.style.width = `${width}px`;
-          canvas.style.height = `${height}px`;
-        }
+		let rafId = 0;
+		let inFlight = false;
+		let lastFrameAt = 0;
+		let lastFbw = 0;
+		let lastFbh = 0;
 
-        ctx.putImageData(new ImageData(pixels, fbw, fbh), 0, 0);
-      } finally {
-        inFlight = false;
-        rafId = requestAnimationFrame(loop);
-      }
-    };
+		const loop = async (t: number) => {
+			if (!alive) return;
 
-    rafId = requestAnimationFrame(loop);
-    return () => {
-      alive = false;
-      cancelAnimationFrame(rafId);
-    };
-  }, [width, height, fps]);
+			const minDt = 1000 / fps;
+			if (t - lastFrameAt < minDt || inFlight) {
+				rafId = requestAnimationFrame(loop);
+				return;
+			}
 
-  return <canvas ref={ref} />;
+			inFlight = true;
+			lastFrameAt = t;
+
+			try {
+				const dpr = 1;
+
+				const payload = await invoke<ArrayBuffer | number[]>(
+					"render_attitude",
+					{
+						winW: native.framebufferWidth,
+						winH: native.framebufferHeight,
+						dpr,
+					},
+				);
+
+				let fbw: number;
+				let fbh: number;
+				let pixels: Uint8ClampedArray;
+
+				if (payload instanceof ArrayBuffer) {
+					const header = new DataView(payload, 0, 8);
+					fbw = header.getUint32(0, true);
+					fbh = header.getUint32(4, true);
+					pixels = new Uint8ClampedArray(payload, 8);
+				} else {
+					fbw = Math.round(native.framebufferWidth * dpr);
+					fbh = Math.round(native.framebufferHeight * dpr);
+					pixels = new Uint8ClampedArray(payload);
+				}
+
+				if (fbw !== lastFbw || fbh !== lastFbh) {
+					lastFbw = fbw;
+					lastFbh = fbh;
+					canvas.width = fbw;
+					canvas.height = fbh;
+				}
+
+				ctx.putImageData(new ImageData(pixels, fbw, fbh), 0, 0);
+			} finally {
+				inFlight = false;
+				rafId = requestAnimationFrame(loop);
+			}
+		};
+
+		rafId = requestAnimationFrame(loop);
+		return () => {
+			alive = false;
+			cancelAnimationFrame(rafId);
+		};
+	}, [fps, native.framebufferWidth, native.framebufferHeight]);
+
+	return <canvas ref={ref} />;
 }
